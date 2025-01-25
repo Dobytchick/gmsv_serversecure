@@ -742,20 +742,23 @@ private:
     return str;
   }
 
-  reply_player_t CallPlayerHook(const sockaddr_in &from) {
+reply_player_t CallPlayerHook(const sockaddr_in &from) {
     char hook[] = "A2S_PLAYER";
 
     reply_player_t players;
     players.dontsend = false;
     players.senddefault = true;
 
-    if (server_lua->Top() > 0)
-      return players;
+    if (server_lua->Top() > 0) {
+        return players;
+    }
 
     int32_t funcs = LuaHelpers::PushHookRun(server_lua, hook);
 
-    if (funcs == 0)
-      return players;
+    if (funcs == 0) {
+        server_lua->Pop(funcs); // Ensure the stack is cleaned up
+        return players;
+    }
 
     server_lua->PushString(IPToString(from.sin_addr));
     server_lua->PushNumber(from.sin_port);
@@ -763,46 +766,46 @@ private:
     LuaHelpers::CallHookRun(server_lua, 2, 1);
 
     if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
-      if (!server_lua->GetBool(-1)) {
-        players.senddefault = false;
-        players.dontsend = true;
-      }
+        if (!server_lua->GetBool(-1)) {
+            players.senddefault = false;
+            players.dontsend = true;
+        }
     } else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
-      players.senddefault = false;
-      players.dontsend = false;
+        players.senddefault = false;
+        players.dontsend = false;
 
-      int count = server_lua->ObjLen(-1);
-      players.count = count;
-      std::vector<player_t> list(count);
+        int count = server_lua->ObjLen(-1);
+        players.count = count;
+        std::vector<player_t> list(count);
 
-      for (int i = 0; i < count; i++) {
-        player_t player;
-        player.index = i;
+        for (int i = 0; i < count; i++) {
+            player_t player;
+            player.index = i;
 
-        server_lua->PushNumber(i + 1);
-        server_lua->GetTable(-2);
+            server_lua->PushNumber(i + 1);
+            server_lua->GetTable(-2);
 
-        server_lua->GetField(-1, "name");
-        player.name = server_lua->GetString(-1);
-        server_lua->Pop(1);
-        server_lua->GetField(-1, "score");
-        player.score = server_lua->GetNumber(-1);
-        server_lua->Pop(1);
-        server_lua->GetField(-1, "time");
-        player.time = server_lua->GetNumber(-1);
-        server_lua->Pop(1);
+            server_lua->GetField(-1, "name");
+            player.name = server_lua->GetString(-1);
+            server_lua->Pop(1);
+            server_lua->GetField(-1, "score");
+            player.score = server_lua->GetNumber(-1);
+            server_lua->Pop(1);
+            server_lua->GetField(-1, "time");
+            player.time = server_lua->GetNumber(-1);
+            server_lua->Pop(1);
 
-        list.at(i) = player;
-        server_lua->Pop(1);
-      }
+            list.at(i) = player;
+            server_lua->Pop(1);
+        }
 
-      players.players = list;
+        players.players = list;
     }
 
-    server_lua->Pop(1);
+    server_lua->Pop(1); // Ensure the stack is cleaned up
 
     return players;
-  }
+}
 
   PacketType SendInfoCache(const sockaddr_in &from, uint32_t time) {
     if (time - info_cache_last_update >= info_cache_time) {
