@@ -772,7 +772,7 @@ private:
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 		
-		if (server_lua->PCall(2, 1, 0) == 0) {
+		if (server_lua->PCall(4, 1, 0) == 0) {
 			if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
 				if (!server_lua->GetBool(-1)) {
 					players.senddefault = false;
@@ -810,7 +810,7 @@ private:
 				players.players = list;
 			}
 			
-			server_lua->Pop(1);
+			server_lua->Pop(4);
 		}
 		
 		return players;
