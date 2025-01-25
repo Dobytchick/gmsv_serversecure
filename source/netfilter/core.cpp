@@ -759,7 +759,7 @@ private:
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 		
-		if (server_lua->PCall(8, 1, 0) != 0)
+		if (server_lua->PCall(3, 1, 0) != 0)
 		{
 			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
 		}
