@@ -751,68 +751,58 @@ private:
 			return players;
 		}
 
-		server_lua->GetField(-10002, "hook");
-			if (server_lua->GetType(-1) != GarrysMod::Lua::Type::Table)
-			{
-				server_lua->Pop(1);
-				DevMsg("Missing hook table!\n");
-				return players;
-			}
-			server_lua->GetField(-1, "Run");
-				if (server_lua->GetType(-1) != GarrysMod::Lua::Type::Function)
-				{
-					server_lua->Pop(2);
-					DevMsg("Missing hook.Run function!\n");
-					return players;
-				} else {
-					server_lua->Remove(-2);
-					server_lua->PushString("A2S_PLAYER");
-				}
+		server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+		server_lua->GetField(-1, "hook");
+		server_lua->GetField(-1, "Run");
 
+		server_lua->PushString("A2S_PLAYER");
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 		
-		if (server_lua->PCall(4, 1, 0) == 0) {
-			if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
-				if (!server_lua->GetBool(-1)) {
-					players.senddefault = false;
-					players.dontsend = true;
-				}
-			} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
-				players.senddefault = false;
-				players.dontsend = false;
-			
-				int count = server_lua->ObjLen(-1);
-				players.count = count;
-				std::vector<player_t> list(count);
-			
-				for (int i = 0; i < count; i++) {
-					player_t player;
-					player.index = i;
-			
-					server_lua->PushNumber(i + 1);
-					server_lua->GetTable(-2);
-			
-					server_lua->GetField(-1, "name");
-					player.name = server_lua->GetString(-1);
-					server_lua->Pop(1);
-					server_lua->GetField(-1, "score");
-					player.score = server_lua->GetNumber(-1);
-					server_lua->Pop(1);
-					server_lua->GetField(-1, "time");
-					player.time = server_lua->GetNumber(-1);
-					server_lua->Pop(1);
-			
-					list.at(i) = player;
-					server_lua->Pop(1);
-				}
-			
-				players.players = list;
-			}
-			
-			server_lua->Pop(4);
+		if (server_lua->PCall(8, 1, 0) != 0)
+		{
+			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
 		}
+
+		if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
+			if (!server_lua->GetBool(-1)) {
+				players.senddefault = false;
+				players.dontsend = true;
+			}
+		} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
+			players.senddefault = false;
+			players.dontsend = false;
 		
+			int count = server_lua->ObjLen(-1);
+			players.count = count;
+			std::vector<player_t> list(count);
+		
+			for (int i = 0; i < count; i++) {
+				player_t player;
+				player.index = i;
+		
+				server_lua->PushNumber(i + 1);
+				server_lua->GetTable(-2);
+		
+				server_lua->GetField(-1, "name");
+				player.name = server_lua->GetString(-1);
+				server_lua->Pop(1);
+				server_lua->GetField(-1, "score");
+				player.score = server_lua->GetNumber(-1);
+				server_lua->Pop(1);
+				server_lua->GetField(-1, "time");
+				player.time = server_lua->GetNumber(-1);
+				server_lua->Pop(1);
+		
+				list.at(i) = player;
+				server_lua->Pop(1);
+			}
+		
+			players.players = list;
+		}
+			
+		LUA->Pop(3);
+
 		return players;
 	}
 
