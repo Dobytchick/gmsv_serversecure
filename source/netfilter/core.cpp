@@ -801,7 +801,7 @@ private:
 			players.players = list;
 		}
 			
-		LUA->Pop(3);
+		server_lua->Pop(3);
 
 		return players;
 	}
