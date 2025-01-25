@@ -756,14 +756,14 @@ private:
 			{
 				server_lua->Pop(1);
 				DevMsg("Missing hook table!\n");
-				return false;
+				return players;
 			}
 			server_lua->GetField(-1, "Run");
 				if (server_lua->GetType(-1) != GarrysMod::Lua::Type::Function)
 				{
 					server_lua->Pop(2);
 					DevMsg("Missing hook.Run function!\n");
-					return false;
+					return players;
 				} else {
 					server_lua->Remove(-2);
 					server_lua->PushString("A2S_PLAYER");
@@ -772,7 +772,7 @@ private:
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 		
-		if (server_lua->CallFunctionProtected(2, 1, true)) {
+		if (server_lua->PCall(2, 1, 0) == 0) {
 			if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
 				if (!server_lua->GetBool(-1)) {
 					players.senddefault = false;
