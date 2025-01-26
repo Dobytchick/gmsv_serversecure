@@ -771,7 +771,7 @@ private:
 		server_lua->PushNumber(from.sin_port);
 
 		if (server_lua->PCall(3, 1, 0) != 0)
-			server_lua->ErrorNoHalt("\n[%s] %s\n\n", hook, server_lua->GetString(-1));
+			DevWarning(2, "\n[%s] %s\n\n", hook, server_lua->GetString(-1));
 		
 		if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL))
 		{
