@@ -743,81 +743,67 @@ private:
   }
 
   reply_player_t CallPlayerHook(const sockaddr_in &from) {
-		reply_player_t newreply;
-		newreply.dontsend = false;
-		newreply.senddefault = true;
-
-		char hook[] = "A2S_PLAYER";
-
-		server_lua->GetField(GarrysMod::Lua::INDEX_GLOBAL, "hook");
-		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE))
-		{
-			DevWarning(2, "[%s] Global hook is not a table!\n", hook);
-			server_lua->Pop(2);
-			return newreply;
+		reply_player_t players;
+		players.dontsend = false;
+		players.senddefault = true;
+		
+		if (server_lua->Top() > 0) {
+			return players;
 		}
 
+		server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+		server_lua->GetField(-1, "hook");
 		server_lua->GetField(-1, "Run");
-		server_lua->Remove(-2);
-		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::FUNCTION))
-		{
-			DevWarning(2, "[%s] Global hook.Run is not a function!\n", hook);
-			server_lua->Pop(2);
-			return newreply;
-		}
 
-		server_lua->PushString(hook);
+		server_lua->PushString("A2S_PLAYER");
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
-
-		if (server_lua->PCall(3, 1, 0) != 0)
-			DevWarning(2, "\n[%s] %s\n\n", hook, server_lua->GetString(-1));
 		
-		if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL))
+		if (server_lua->PCall(3, 1, 0) != 0)
 		{
-			if (!server_lua->GetBool(-1))
-			{
-				newreply.senddefault = false;
-				newreply.dontsend = true; // dont send when return false
-			}
+			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
 		}
-		else if (server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE))
-		{
-			newreply.senddefault = false;
 
+		if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
+			if (!server_lua->GetBool(-1)) {
+				players.senddefault = false;
+				players.dontsend = true;
+			}
+		} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
+			players.senddefault = false;
+			players.dontsend = false;
+		
 			int count = server_lua->ObjLen(-1);
-			newreply.count = count;
-			
-			std::vector<player_t> newPlayers(count);
-
-			for (int i = 0; i < count; i++)
-			{
-				player_t newPlayer;
-				newPlayer.index = i;
-
+			players.count = count;
+			std::vector<player_t> list(count);
+		
+			for (int i = 0; i < count; i++) {
+				player_t player;
+				player.index = i;
+		
 				server_lua->PushNumber(i + 1);
 				server_lua->GetTable(-2);
-
+		
 				server_lua->GetField(-1, "name");
-				newPlayer.name = server_lua->GetString(-1);
+				player.name = server_lua->GetString(-1);
 				server_lua->Pop(1);
-
 				server_lua->GetField(-1, "score");
-				newPlayer.score = server_lua->GetNumber(-1);
+				player.score = server_lua->GetNumber(-1);
 				server_lua->Pop(1);
-
 				server_lua->GetField(-1, "time");
-				newPlayer.time = server_lua->GetNumber(-1);
-				server_lua->Pop(1);				
-
+				player.time = server_lua->GetNumber(-1);
 				server_lua->Pop(1);
-				newPlayers.at(i) = newPlayer;
+		
+				list.at(i) = player;
+				server_lua->Pop(1);
 			}
-
-			newreply.players = newPlayers;
+		
+			players.players = list;
 		}
+			
+		server_lua->Pop(3);
 
-		server_lua->Pop(1);
+		return players;
 	}
 
   PacketType SendInfoCache(const sockaddr_in &from, uint32_t time) {
@@ -868,6 +854,7 @@ private:
       if (!CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, challenge)) {
         return SendInfoChallenge(from);
       }
+
       return SendInfoCache(from, time);
     }
 
