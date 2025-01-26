@@ -768,7 +768,7 @@ private:
 		}
 
 		server_lua->PushString(hook);
-		server_lua->PushString(inet_ntoa(from.sin_addr));
+		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 
 		if (server_lua->PCall(3, 1, 0) != 0)
