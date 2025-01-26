@@ -747,13 +747,12 @@ private:
 		newreply.dontsend = false;
 		newreply.senddefault = true;
 
-
 		char hook[] = "A2S_PLAYER";
 
 		server_lua->GetField(GarrysMod::Lua::INDEX_GLOBAL, "hook");
 		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE))
 		{
-			server_lua->ErrorNoHalt("[%s] Global hook is not a table!\n", hook);
+			DevWarning(2, "[%s] Global hook is not a table!\n", hook);
 			server_lua->Pop(2);
 			return newreply;
 		}
@@ -762,7 +761,7 @@ private:
 		server_lua->Remove(-2);
 		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::FUNCTION))
 		{
-			server_lua->ErrorNoHalt("[%s] Global hook.Run is not a function!\n", hook);
+			DevWarning(2, "[%s] Global hook.Run is not a function!\n", hook);
 			server_lua->Pop(2);
 			return newreply;
 		}
@@ -838,20 +837,11 @@ private:
   }
 
   PacketType SendInfoChallenge(const sockaddr_in &from) {
-    uint8_t challenge_pkt[4 + 1 + 4] = {0}; 
+    uint8_t challenge_pkt[4 + 1 + 4] {0};
     *reinterpret_cast<uint32_t*>(challenge_pkt) = 0xFFFFFFFF;
     *reinterpret_cast<uint8_t*>(challenge_pkt + 4) = 'A';
-    
     netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-    uint32_t challenge_nr = CBaseServerProxy::Singleton->GetChallengeNr(net_addr);
-    
-    if (sizeof(challenge_pkt) >= (4 + 1 + sizeof(uint32_t))) {
-        *reinterpret_cast<uint32_t*>(challenge_pkt + 4 + 1) = challenge_nr;
-    } else {
-        DevWarning("[ServerSecure] Challenge packet buffer too small\n");
-        return PacketType::Invalid;
-    }
-
+    *reinterpret_cast<uint32_t*>(challenge_pkt + 4 + 1) = CBaseServerProxy::Singleton->GetChallengeNr(net_addr);
     sendto(game_socket, reinterpret_cast<char *>(&challenge_pkt),
            sizeof(challenge_pkt), 0,
            reinterpret_cast<const sockaddr *>(&from), sizeof(from));
@@ -873,16 +863,11 @@ private:
         return SendInfoChallenge(from);
       }
       constexpr ssize_t CHALLENGE_OFFSET = 4 + 1 + 20;
-      if (length < CHALLENGE_OFFSET + sizeof(uint32_t)) {
-          DevWarning("[ServerSecure] Received packet too short for challenge number\n");
-          return SendInfoCache(from, time);
-      }
       uint32_t challenge = *reinterpret_cast<const uint32_t*>(buffer + CHALLENGE_OFFSET);
       netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
       if (!CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, challenge)) {
         return SendInfoChallenge(from);
       }
-
       return SendInfoCache(from, time);
     }
 
