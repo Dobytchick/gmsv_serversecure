@@ -2,7 +2,6 @@
 #include "baseserver.hpp"
 #include "clientmanager.hpp"
 #include <iostream>
-#include "processingtime.hpp"
 
 #include <GarrysMod/FactoryLoader.hpp>
 #include <GarrysMod/FunctionPointers.hpp>
@@ -729,8 +728,6 @@ private:
   IServerGameDLL *gamedll = nullptr;
   IVEngineServer *engine_server = nullptr;
   IFileSystem *filesystem = nullptr;
-
-  CNetChanProxy processingtime_hook;
 
   static inline const char *IPToString(const in_addr &addr) {
     static std::array<char, INET_ADDRSTRLEN> buffer{};
