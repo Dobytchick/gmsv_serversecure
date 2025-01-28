@@ -846,6 +846,8 @@ private:
                  rate_limit == ClientManager::RateLimitType::Individual
                      ? "individual"
                      : "global");
+      return PacketType::Invalid;
+    }
 
     if (info_cache_enabled) {
       if (length == 25) {
@@ -877,6 +879,8 @@ private:
                  rate_limit == ClientManager::RateLimitType::Individual
                      ? "individual"
                      : "global");
+      return PacketType::Invalid;
+    }
 
     // 5 seconds
     if (time - info_cache_players_last_update >= info_cache_players_time) {
@@ -1027,6 +1031,8 @@ private:
                      rate_limit == ClientManager::RateLimitType::Individual
                          ? "individual"
                          : "global");
+          return PacketType::Invalid;
+        }
 
         packet.ReadLong(); // client challenge
 
