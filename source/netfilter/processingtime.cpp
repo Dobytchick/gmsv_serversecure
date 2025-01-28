@@ -1,17 +1,10 @@
 #include "processingtime.hpp"
 
 #include <inetchannel.h>
-#include <tier1/iconvar.h>
 
 class CNetChan : public INetChannel {};
 
 namespace netfilter {
-static const ConVar
-    net_chan_limit_msec("net_chan_limit_msec", "0",
-                        FCVAR_ARCHIVE | FCVAR_GAMEDLL,
-                        "Netchannel processing is limited to so many "
-                        "milliseconds, abort connection if exceeding budget");
-
 static FunctionPointers::CNetChan_ProcessMessages_t ProcessMessages_original =
     nullptr;
 
@@ -57,7 +50,7 @@ CNetChanProxy::CNetChanProxy() {
 CNetChanProxy::~CNetChanProxy() { UnHook(ProcessMessages_original); }
 
 bool CNetChanProxy::ProcessMessages(bf_read &buf) {
-  const auto limit_msec = net_chan_limit_msec.GetInt();
+  const auto limit_msec = 1000;
   if (limit_msec <= 0) {
     return Call(ProcessMessages_original, buf);
   }
