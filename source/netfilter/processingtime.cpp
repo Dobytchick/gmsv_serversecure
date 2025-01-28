@@ -1,5 +1,5 @@
 #include "processingtime.hpp"
-
+#include <mutex>
 #include <inetchannel.h>
 
 class CNetChan : public INetChannel {};
@@ -14,6 +14,7 @@ static FunctionPointers::NET_ProcessSocket_t NET_ProcessSocket_original =
 static Detouring::Hook NET_ProcessSocket_hook;
 
 static std::unordered_map<CNetChan *, uint32_t> processing_times;
+static std::mutex processing_times_mutex; 
 
 static void NET_ProcessSocket_detour(int sock,
                                      IConnectionlessPacketHandler *handler) {
@@ -60,18 +61,21 @@ bool CNetChanProxy::ProcessMessages(bf_read &buf) {
   const auto time_spent = Plat_MSTime() - start;
 
   CNetChan *netchan = This();
-  auto it = processing_times.find(netchan);
-  if (it == processing_times.end()) {
-    const auto [new_it, _] = processing_times.emplace(netchan, 0);
-    it = new_it;
-  }
+  {
+    std::lock_guard<std::mutex> lock(processing_times_mutex);
+    auto it = processing_times.find(netchan);
+    if (it == processing_times.end()) {
+      const auto [new_it, _] = processing_times.emplace(netchan, 0);
+      it = new_it;
+    }
 
-  auto &total_spent = it->second;
-  total_spent += time_spent;
+    auto &total_spent = it->second;
+    total_spent += time_spent;
 
-  if (total_spent >= static_cast<uint32_t>(limit_msec)) {
-    netchan->Shutdown("Processing time exceeded");
-    return false;
+    if (total_spent >= static_cast<uint32_t>(limit_msec)) {
+      netchan->Shutdown("Processing time exceeded");
+      return false;
+    }
   }
 
   return result;
