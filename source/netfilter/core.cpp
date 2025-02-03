@@ -799,7 +799,7 @@ private:
 			server_lua->Pop(1);
 
 			players.players = list;
-		    else {
+		    } else {
 		        // Неожиданный тип - просто очищаем стек
 		        server_lua->Pop(1);
 		    }
