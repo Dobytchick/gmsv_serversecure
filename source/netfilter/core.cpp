@@ -743,7 +743,7 @@ private:
 		reply_player_t players;
 		players.dontsend = false;
 		players.senddefault = true;
-
+		
 		int initial_stack = server_lua->Top();
 		if (initial_stack > 0) {
 			return players;
@@ -757,17 +757,19 @@ private:
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 		
-		    int pcallResult = server_lua->PCall(3, 1, 0);
-		    if (pcallResult != 0) {
-		        Warning("[gmsv_serversecure] PCall error: %s\n", server_lua->GetString(-1));
-		        server_lua->Pop(1);
-		    }
+		if (server_lua->PCall(3, 1, 0) != 0)
+		{
+			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
+			server_lua->Pop(3);
+			return players;
+		}
 
-		    if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
-		        players.senddefault = server_lua->GetBool(-1);
-		        players.dontsend = !players.senddefault;
-		        server_lua->Pop(1); // Удаляем bool
-		    }  else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
+		if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
+			if (!server_lua->GetBool(-1)) {
+				players.senddefault = false;
+				players.dontsend = true;
+			}
+		} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
 			players.senddefault = false;
 			players.dontsend = false;
 		
@@ -795,15 +797,10 @@ private:
 				list.at(i) = player;
 				server_lua->Pop(1);
 			}
-
-			server_lua->Pop(1);
-
+		
 			players.players = list;
-		    } else {
-		        // Неожиданный тип - просто очищаем стек
-		        server_lua->Pop(1);
-		    }
-
+		}
+			
 		server_lua->Pop(3);
 
 		    if (server_lua->Top() != initial_stack) {
