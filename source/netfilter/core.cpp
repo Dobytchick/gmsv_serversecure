@@ -739,69 +739,89 @@ private:
     return str;
   }
 
-  reply_player_t CallPlayerHook(const sockaddr_in &from) {
-		reply_player_t players;
-		players.dontsend = false;
-		players.senddefault = true;
-		
-		if (server_lua->Top() > 0) {
-			return players;
-		}
+reply_player_t CallPlayerHook(const sockaddr_in &from) {
+    reply_player_t players;
+    players.dontsend = false;
+    players.senddefault = true;
+    
+    if (server_lua->Top() > 0) {
+        return players;
+    }
 
-		server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-		server_lua->GetField(-1, "hook");
-		server_lua->GetField(-1, "Run");
+    server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    server_lua->GetField(-1, "hook");
+    server_lua->GetField(-1, "Run");
 
-		server_lua->PushString("A2S_PLAYER");
-		server_lua->PushString(IPToString(from.sin_addr));
-		server_lua->PushNumber(from.sin_port);
-		
-		if (server_lua->PCall(3, 1, 0) != 0)
-		{
-			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
-		}
+    server_lua->PushString("A2S_PLAYER");
+    server_lua->PushString(IPToString(from.sin_addr));
+    server_lua->PushNumber(from.sin_port);
+    
+    int pcallResult = server_lua->PCall(3, 1, 0);
+    if (pcallResult != 0) {
+        Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
+    }
 
-		if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
-			if (!server_lua->GetBool(-1)) {
-				players.senddefault = false;
-				players.dontsend = true;
-			}
-		} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
-			players.senddefault = false;
-			players.dontsend = false;
-		
-			int count = server_lua->ObjLen(-1);
-			players.count = count;
-			std::vector<player_t> list(count);
-		
-			for (int i = 0; i < count; i++) {
-				player_t player;
-				player.index = i;
-		
-				server_lua->PushNumber(i + 1);
-				server_lua->GetTable(-2);
-		
-				server_lua->GetField(-1, "name");
-				player.name = server_lua->GetString(-1);
-				server_lua->Pop(1);
-				server_lua->GetField(-1, "score");
-				player.score = server_lua->GetNumber(-1);
-				server_lua->Pop(1);
-				server_lua->GetField(-1, "time");
-				player.time = server_lua->GetNumber(-1);
-				server_lua->Pop(1);
-		
-				list.at(i) = player;
-				server_lua->Pop(1);
-			}
-		
-			players.players = list;
-		}
-			
-		server_lua->Pop(3);
+    if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
+        if (!server_lua->GetBool(-1)) {
+            players.senddefault = false;
+            players.dontsend = true;
+        }
+    } else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
+        players.senddefault = false;
+        players.dontsend = false;
+    
+        int count = server_lua->ObjLen(-1);
+        players.count = count;
+        std::vector<player_t> list(count);
+    
+        for (int i = 0; i < count; i++) {
+            player_t player;
+            player.index = i;
+    
+            server_lua->PushNumber(i + 1);
+            server_lua->GetTable(-2);
+    
+            // Проверяем, является ли элемент таблицей
+            if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
+                server_lua->GetField(-1, "name");
+                if (server_lua->IsType(-1, GarrysMod::Lua::Type::String)) {
+                    player.name = server_lua->GetString(-1);
+                }
+                server_lua->Pop(1);
+                
+                server_lua->GetField(-1, "score");
+                if (server_lua->IsType(-1, GarrysMod::Lua::Type::Number)) {
+                    player.score = server_lua->GetNumber(-1);
+                }
+                server_lua->Pop(1);
+                
+                server_lua->GetField(-1, "time");
+                if (server_lua->IsType(-1, GarrysMod::Lua::Type::Number)) {
+                    player.time = server_lua->GetNumber(-1);
+                }
+                server_lua->Pop(1);
+            } else {
+                // Обработка некорректного элемента
+                player.name = "Invalid Player";
+                player.score = 0;
+                player.time = 0.0f;
+            }
+    
+            list.at(i) = player;
+            server_lua->Pop(1); // Удаляем элемент таблицы
+        }
+    
+        players.players = list;
+    }
 
-		return players;
-	}
+    // Удаляем результат PCall
+    server_lua->Pop(1);
+    
+    // Удаляем Run, hook, _G
+    server_lua->Pop(3);
+
+    return players;
+}
 
   PacketType SendInfoCache(const sockaddr_in &from, uint32_t time) {
     if (time - info_cache_last_update >= info_cache_time) {
