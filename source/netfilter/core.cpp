@@ -753,7 +753,7 @@ private:
 		server_lua->GetField(GarrysMod::Lua::INDEX_GLOBAL, "hook");
 		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE))
 		{
-			server_lua->ErrorNoHalt("[%s] Global hook is not a table!\n", hook);
+			Warning("[gmsv_serversecure error] Global hook is not a table!\n");
 			server_lua->Pop(2);
 			return players;
 		}
@@ -762,7 +762,7 @@ private:
 		server_lua->Remove(-2);
 		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::FUNCTION))
 		{
-			server_lua->ErrorNoHalt("[%s] Global hook.Run is not a function!\n", hook);
+			Warning("[gmsv_serversecure error] Global hook.Run is not a function!\n");
 			server_lua->Pop(2);
 			return players;
 		}
@@ -771,7 +771,7 @@ private:
 		server_lua->PushString(IPToString(from.sin_addr));
 		server_lua->PushNumber(from.sin_port);
 		if (server_lua->PCall(3, 1, 0) != 0)
-			server_lua->ErrorNoHalt("\n[%s] %s\n\n", hook, server_lua->GetString(-1));
+			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
 		
 		if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL))
 		{
@@ -817,7 +817,7 @@ private:
 			players.players = newPlayers;
 		}
 
-		lua->Pop(1);
+		server_lua->Pop(1);
 
 		    if (server_lua->Top() != initial_stack) {
 		        Warning("[gmsv_serversecure] Stack leak detected: %d -> %d", 
