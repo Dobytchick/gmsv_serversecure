@@ -739,77 +739,82 @@ private:
     return str;
   }
 
-  reply_player_t CallPlayerHook(const sockaddr_in &from) {
-		reply_player_t players;
-		players.dontsend = false;
-		players.senddefault = true;
-		
-		int initial_stack = server_lua->Top();
-		if (initial_stack > 0) {
-			return players;
-		}
+reply_player_t CallPlayerHook(const sockaddr_in &from) {
+    reply_player_t players;
+    players.dontsend = false;
+    players.senddefault = true;
+    
+    int initial_stack = server_lua->Top();
+    if (initial_stack > 0) {
+        return players;
+    }
 
-		server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-		server_lua->GetField(-1, "hook");
-		server_lua->GetField(-1, "Run");
+    server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
+    server_lua->GetField(-1, "hook");
+    server_lua->GetField(-1, "Run");
+    
+    // Pop the global and hook tables, leaving only Run function on the stack
+    server_lua->Pop(2); // Pops "hook" and "global", stack now has [Run]
+    
+    server_lua->PushString("A2S_PLAYER");
+    server_lua->PushString(IPToString(from.sin_addr));
+    server_lua->PushNumber(from.sin_port);
+    
+    // Stack now: [Run, "A2S_PLAYER", IP, port]
+    if (server_lua->PCall(3, 1, 0) != 0) {
+        Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
+        server_lua->Pop(1); // Pop the error message
+        return players;
+    }
 
-		server_lua->PushString("A2S_PLAYER");
-		server_lua->PushString(IPToString(from.sin_addr));
-		server_lua->PushNumber(from.sin_port);
-		
-		if (server_lua->PCall(3, 1, 0) != 0)
-		{
-			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
-			server_lua->Pop(3);
-			return players;
-		}
+    // Stack now: [result]
+    if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
+        if (!server_lua->GetBool(-1)) {
+            players.senddefault = false;
+            players.dontsend = true;
+        }
+    } else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
+        players.senddefault = false;
+        players.dontsend = false;
+    
+        int count = server_lua->ObjLen(-1);
+        players.count = count;
+        std::vector<player_t> list(count);
+    
+        for (int i = 0; i < count; i++) {
+            player_t player;
+            player.index = i;
+    
+            server_lua->PushNumber(i + 1);
+            server_lua->GetTable(-2);
+    
+            server_lua->GetField(-1, "name");
+            player.name = server_lua->GetString(-1);
+            server_lua->Pop(1);
+            server_lua->GetField(-1, "score");
+            player.score = server_lua->GetNumber(-1);
+            server_lua->Pop(1);
+            server_lua->GetField(-1, "time");
+            player.time = server_lua->GetNumber(-1);
+            server_lua->Pop(1);
+    
+            list.at(i) = player;
+            server_lua->Pop(1);
+        }
+    
+        players.players = list;
+    }
+    
+    // Pop the result
+    server_lua->Pop(1);
 
-		if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
-			if (!server_lua->GetBool(-1)) {
-				players.senddefault = false;
-				players.dontsend = true;
-			}
-		} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
-			players.senddefault = false;
-			players.dontsend = false;
-		
-			int count = server_lua->ObjLen(-1);
-			players.count = count;
-			std::vector<player_t> list(count);
-		
-			for (int i = 0; i < count; i++) {
-				player_t player;
-				player.index = i;
-		
-				server_lua->PushNumber(i + 1);
-				server_lua->GetTable(-2);
-		
-				server_lua->GetField(-1, "name");
-				player.name = server_lua->GetString(-1);
-				server_lua->Pop(1);
-				server_lua->GetField(-1, "score");
-				player.score = server_lua->GetNumber(-1);
-				server_lua->Pop(1);
-				server_lua->GetField(-1, "time");
-				player.time = server_lua->GetNumber(-1);
-				server_lua->Pop(1);
-		
-				list.at(i) = player;
-				server_lua->Pop(1);
-			}
-		
-			players.players = list;
-		}
-			
-		server_lua->Pop(3);
+    if (server_lua->Top() != initial_stack) {
+        Warning("[gmsv_serversecure] Stack leak detected: %d -> %d", 
+               initial_stack, server_lua->Top());
+    }
 
-		    if (server_lua->Top() != initial_stack) {
-		        Warning("[gmsv_serversecure] Stack leak detected: %d -> %d", 
-		               initial_stack, server_lua->Top());
-		    }
-
-		return players;
-	}
+    return players;
+}
 
   PacketType SendInfoCache(const sockaddr_in &from, uint32_t time) {
     if (time - info_cache_last_update >= info_cache_time) {
