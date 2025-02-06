@@ -749,59 +749,75 @@ private:
 			return players;
 		}
 
-		server_lua->PushSpecial(GarrysMod::Lua::SPECIAL_GLOB);
-		server_lua->GetField(-1, "hook");
-		server_lua->GetField(-1, "Run");
-
-		server_lua->PushString("A2S_PLAYER");
-		server_lua->PushString(IPToString(from.sin_addr));
-		server_lua->PushNumber(from.sin_port);
-		
-		if (server_lua->PCall(3, 1, 0) != 0)
+	  	char hook[] = "A2S_PLAYER";
+		server_lua->GetField(GarrysMod::Lua::INDEX_GLOBAL, "hook");
+		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE))
 		{
-			Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
-			server_lua->Pop(3);
+			server_lua->ErrorNoHalt("[%s] Global hook is not a table!\n", hook);
+			server_lua->Pop(2);
 			return players;
 		}
 
-		if (server_lua->IsType(-1, GarrysMod::Lua::Type::Bool)) {
-			if (!server_lua->GetBool(-1)) {
-				players.senddefault = false;
-				players.dontsend = true;
-			}
-		} else if (server_lua->IsType(-1, GarrysMod::Lua::Type::Table)) {
-			players.senddefault = false;
-			players.dontsend = false;
+		server_lua->GetField(-1, "Run");
+		server_lua->Remove(-2);
+		if (!server_lua->IsType(-1, GarrysMod::Lua::Type::FUNCTION))
+		{
+			server_lua->ErrorNoHalt("[%s] Global hook.Run is not a function!\n", hook);
+			server_lua->Pop(2);
+			return players;
+		}
+
+		server_lua->PushString(hook);
+		server_lua->PushString(IPToString(from.sin_addr));
+		server_lua->PushNumber(from.sin_port);
+		if (server_lua->PCall(3, 1, 0) != 0)
+			server_lua->ErrorNoHalt("\n[%s] %s\n\n", hook, server_lua->GetString(-1));
 		
+		if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL))
+		{
+			if (!server_lua->GetBool(-1))
+			{
+				players.senddefault = false;
+				players.dontsend = true; // dont send when return false
+			}
+		}
+		else if (server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE))
+		{
+			players.senddefault = false;
+
 			int count = server_lua->ObjLen(-1);
 			players.count = count;
-			std::vector<player_t> list(count);
-		
-			for (int i = 0; i < count; i++) {
-				player_t player;
-				player.index = i;
-		
+			
+			std::vector<player_t> newPlayers(count);
+
+			for (int i = 0; i < count; i++)
+			{
+				player_t newPlayer;
+				newPlayer.index = i;
+
 				server_lua->PushNumber(i + 1);
 				server_lua->GetTable(-2);
-		
+
 				server_lua->GetField(-1, "name");
-				player.name = server_lua->GetString(-1);
+				newPlayer.name = server_lua->GetString(-1);
 				server_lua->Pop(1);
+
 				server_lua->GetField(-1, "score");
-				player.score = server_lua->GetNumber(-1);
+				newPlayer.score = server_lua->GetNumber(-1);
 				server_lua->Pop(1);
+
 				server_lua->GetField(-1, "time");
-				player.time = server_lua->GetNumber(-1);
+				newPlayer.time = server_lua->GetNumber(-1);
+				server_lua->Pop(1);				
+
 				server_lua->Pop(1);
-		
-				list.at(i) = player;
-				server_lua->Pop(1);
+				newPlayers.at(i) = newPlayer;
 			}
-		
-			players.players = list;
+
+			players.players = newPlayers;
 		}
-			
-		server_lua->Pop(3);
+
+		lua->Pop(1);
 
 		    if (server_lua->Top() != initial_stack) {
 		        Warning("[gmsv_serversecure] Stack leak detected: %d -> %d", 
