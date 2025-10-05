@@ -8,6 +8,10 @@ on:
 jobs:
   build-linux:
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ github.workspace }}
 
     steps:
       - name: Checkout repository
@@ -25,14 +29,13 @@ jobs:
 
       - name: Install toolchain and premake
         run: |
-          set -e
-          # premake (готовый бинарь под 24.04)
+          set -euxo pipefail
           wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta7/premake-5.0.0-beta7-linux.tar.gz -O premake.tar.gz
           tar -xzf premake.tar.gz
           sudo install -m 0755 premake5 /usr/local/bin/premake5
-          premake5 --version
+          # важно: проверяем версию вне корня репо, чтобы не читать premake5.lua
+          (cd /tmp && premake5 --version)
 
-          # 32-битные либы и тулчейн
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get -y --no-install-recommends install \
@@ -41,7 +44,7 @@ jobs:
 
       - name: Generate Project
         run: |
-          premake5 --gmcommon=garrysmod_common gmake
+          premake5 --gmcommon="${GITHUB_WORKSPACE}/garrysmod_common" gmake
 
       - name: Make
         run: |
