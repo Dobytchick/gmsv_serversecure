@@ -21,15 +21,16 @@ jobs:
 
       - name: Install deps
         run: |
-          wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz -O premake.tar.gz
+          # Было: v5.0.0-beta2
+          wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta7/premake-5.0.0-beta7-linux.tar.gz -O premake.tar.gz
           tar -xvf premake.tar.gz
           chmod +x premake5
           sudo cp premake5 /usr/bin
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          # clang-9 в 22.04 не нужен, оставим gcc/multilib; при желании можешь добавить clang-14
           sudo apt-get -y --no-install-recommends install build-essential cmake gdb git wget g++ g++-multilib gcc-multilib libc6-dev-i386
-          gcc --version
+          premake5 --version
+
 
       - name: Generate Project
         run: premake5 --gmcommon=garrysmod_common gmake
