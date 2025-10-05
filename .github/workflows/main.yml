@@ -1,17 +1,9 @@
-name: Build
-
-on:
-  push:
-    branches: [ master ]
-  workflow_dispatch:
-
 jobs:
   build-linux:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
       - uses: actions/checkout@v4
         with:
           repository: danielga/garrysmod_common
@@ -21,16 +13,18 @@ jobs:
 
       - name: Install deps
         run: |
-          # Было: v5.0.0-beta2
-          wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta7/premake-5.0.0-beta7-linux.tar.gz -O premake.tar.gz
-          tar -xvf premake.tar.gz
-          chmod +x premake5
-          sudo cp premake5 /usr/bin
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get -y --no-install-recommends install build-essential cmake gdb git wget g++ g++-multilib gcc-multilib libc6-dev-i386
-          premake5 --version
+          sudo apt-get -y --no-install-recommends install build-essential cmake gdb git wget make g++ g++-multilib gcc-multilib libc6-dev-i386
 
+      - name: Build premake from source (beta7)
+        run: |
+          wget https://github.com/premake/premake-core/archive/refs/tags/v5.0.0-beta7.tar.gz -O premake-src.tar.gz
+          tar -xzf premake-src.tar.gz
+          cd premake-core-5.0.0-beta7
+          make -f Bootstrap.mak linux
+          sudo install -m 0755 bin/release/premake5 /usr/local/bin/premake5
+          premake5 --version
 
       - name: Generate Project
         run: premake5 --gmcommon=garrysmod_common gmake
