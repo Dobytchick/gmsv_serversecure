@@ -1,40 +1,54 @@
+name: Build
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
+    runs-on: ubuntu-24.04
 
-      - uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Checkout garrysmod_common
+        uses: actions/checkout@v4
         with:
           repository: danielga/garrysmod_common
           ref: master
           path: garrysmod_common
           submodules: recursive
 
-      - name: Install deps
+      - name: Install toolchain and premake
         run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get -y --no-install-recommends install build-essential cmake gdb git wget make g++ g++-multilib gcc-multilib libc6-dev-i386
-
-      - name: Build premake from source (beta7)
-        run: |
-          wget https://github.com/premake/premake-core/archive/refs/tags/v5.0.0-beta7.tar.gz -O premake-src.tar.gz
-          tar -xzf premake-src.tar.gz
-          cd premake-core-5.0.0-beta7
-          make -f Bootstrap.mak linux
-          sudo install -m 0755 bin/release/premake5 /usr/local/bin/premake5
+          set -e
+          # premake (готовый бинарь под 24.04)
+          wget https://github.com/premake/premake-core/releases/download/v5.0.0-beta7/premake-5.0.0-beta7-linux.tar.gz -O premake.tar.gz
+          tar -xzf premake.tar.gz
+          sudo install -m 0755 premake5 /usr/local/bin/premake5
           premake5 --version
 
+          # 32-битные либы и тулчейн
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get -y --no-install-recommends install \
+            build-essential cmake gdb git wget \
+            g++ g++-multilib gcc-multilib libc6-dev-i386
+
       - name: Generate Project
-        run: premake5 --gmcommon=garrysmod_common gmake
+        run: |
+          premake5 --gmcommon=garrysmod_common gmake
 
       - name: Make
         run: |
           cd projects/linux/gmake
           make -j"$(nproc)"
           make config=release_x86 -j"$(nproc)"
-          ls
+          ls -R
 
       - name: Upload Linux Build Artifacts
         uses: actions/upload-artifact@v4
