@@ -39,7 +39,6 @@
 #include <string_view>
 #include <unordered_set>
 #include <vector>
-#include <algorithm>
 
 #if defined SYSTEM_WINDOWS
 
@@ -103,22 +102,18 @@ struct player_t {
 };
 
 struct reply_player_t {
-  bool dontsend;
-  bool senddefault;
+  bool dontsend = false;
+  bool senddefault = true;
 
-  byte count;
+  byte count = 0;
   std::vector<player_t> players;
-};
-
-struct reply_map_t {
-  bool dontsend;        // return false -> no reply at all
-  bool senddefault;     // nil/true/other -> default engine/cache
-  std::string map;      // if non-empty -> override map in A2S_INFO
 };
 
 GarrysMod::Lua::ILuaBase *server_lua = nullptr;
 
 namespace netfilter {
+
+// ---------- CBaseServerProxy: challenge helpers ----------
 
 class CBaseServerProxy
     : public Detouring::ClassProxy<CBaseServer, CBaseServerProxy> {
@@ -168,6 +163,7 @@ public:
       return true;
     }
 
+    // try previous
     m_previous_challenge[4] = adr.GetIPNetworkByteOrder();
 
     hasher.Reset();
@@ -212,9 +208,7 @@ public:
     try {
       return std::mt19937(std::random_device{}());
     } catch (const std::exception &e) {
-      Warning("[ServerSecure] Failed to initialize RNG seed, falling back to "
-              "less secure current time seed: %s\n",
-              e.what());
+      Warning("[ServerSecure] Failed to initialize RNG seed, fallback to time: %s\n", e.what());
       return std::mt19937(
           static_cast<uint32_t>(Plat_FloatTime() * 1000000));
     }
@@ -235,7 +229,14 @@ std::array<uint32_t, 5> CBaseServerProxy::m_challenge;
 
 std::unique_ptr<CBaseServerProxy> CBaseServerProxy::Singleton;
 
-static bool CheckChallengeNr(const netadr_t &adr, const int nChallengeValue);
+static bool CheckChallengeNr(const netadr_t &adr, const int nChallengeValue) {
+  if (!CBaseServerProxy::Singleton) {
+    return false;
+  }
+  return CBaseServerProxy::Singleton->CheckChallengeNr(adr, nChallengeValue);
+}
+
+// ------------------------- Core -------------------------
 
 class Core {
 private:
@@ -247,12 +248,17 @@ private:
     std::string ver;
   };
 
+  struct reply_map_t {
+    bool dontsend = false;     // вернуть false из хука — вообще не слать ответ
+    bool senddefault = true;   // nil/true — отдать стандартный
+    std::string map;           // строка — оверрайд карты
+  };
+
   reply_player_t ch_players;
 
 public:
   struct packet_t {
     packet_t() : address(), address_size(sizeof(address)) {}
-
     sockaddr_in address;
     socklen_t address_size;
     std::vector<uint8_t> buffer;
@@ -276,8 +282,7 @@ public:
     }
 
     if (sv_visiblemaxplayers == nullptr) {
-      Warning(
-          "[ServerSecure] Failed to get \"sv_visiblemaxplayers\" convar!\n");
+      Warning("[ServerSecure] Failed to get \"sv_visiblemaxplayers\" convar!\n");
     }
 
     if (sv_location == nullptr) {
@@ -286,14 +291,12 @@ public:
 
     gamedll = InterfacePointers::ServerGameDLL();
     if (gamedll == nullptr) {
-      throw std::runtime_error(
-          "failed to load required IServerGameDLL interface");
+      throw std::runtime_error("failed to load required IServerGameDLL interface");
     }
 
     engine_server = InterfacePointers::VEngineServer();
     if (engine_server == nullptr) {
-      throw std::runtime_error(
-          "failed to load required IVEngineServer interface");
+      throw std::runtime_error("failed to load required IVEngineServer interface");
     }
 
     filesystem = InterfacePointers::FileSystem();
@@ -340,7 +343,6 @@ public:
 
   Core(const Core &) = delete;
   Core(Core &&) = delete;
-
   Core &operator=(const Core &) = delete;
   Core &operator=(Core &&) = delete;
 
@@ -374,7 +376,6 @@ public:
             gm_name.substr(gm_name.size() - suffix.size()) == suffix) {
           gm_name = gm_name.substr(0, gm_name.size() - suffix.size());
         }
-
         reply_info.tags.gm = gm_name;
       } else {
         reply_info.tags.gm.clear();
@@ -497,8 +498,8 @@ public:
 
     info_cache_packet.Reset();
 
-    info_cache_packet.WriteLong(-1);  // connectionless
-    info_cache_packet.WriteByte('I'); // A2S_INFO
+    info_cache_packet.WriteLong(-1);  // header
+    info_cache_packet.WriteByte('I'); // type
     info_cache_packet.WriteByte(default_proto_version);
     info_cache_packet.WriteString(server_name);
     info_cache_packet.WriteString(map_name);
@@ -508,11 +509,15 @@ public:
     info_cache_packet.WriteByte(num_clients);
     info_cache_packet.WriteByte(max_players);
     info_cache_packet.WriteByte(num_fake_clients);
-    info_cache_packet.WriteByte('d');
+    info_cache_packet.WriteByte('d'); // dedicated
     info_cache_packet.WriteByte(operating_system_char);
     info_cache_packet.WriteByte(has_password ? 1 : 0);
     info_cache_packet.WriteByte(static_cast<int>(vac_secure));
     info_cache_packet.WriteString(game_version);
+    // 0x80 - port
+    // 0x10 - server steamid
+    // 0x20 - tags
+    // 0x01 - long appid
     info_cache_packet.WriteByte(0x80 | 0x10 | (has_tags ? 0x20 : 0x00) | 0x01);
     info_cache_packet.WriteShort(udp_port);
     info_cache_packet.WriteLongLong(static_cast<int64_t>(steamid));
@@ -526,7 +531,7 @@ public:
     player_cache_packet.Reset();
 
     player_cache_packet.WriteLong(-1);
-    player_cache_packet.WriteByte('D'); // A2S_PLAYER reply
+    player_cache_packet.WriteByte('D');
 
     player_cache_packet.WriteByte(info.count);
 
@@ -543,6 +548,7 @@ public:
     firewall_whitelist_enabled = enabled;
   }
 
+  // Whitelisted IPs bytes need to be in network order (big endian)
   void AddWhitelistIP(const uint32_t address) {
     firewall_whitelist.insert(address);
   }
@@ -559,6 +565,7 @@ public:
     firewall_blacklist_enabled = enabled;
   }
 
+  // Blacklisted IPs bytes need to be in network order (big endian)
   void AddBlacklistIP(const uint32_t address) {
     firewall_blacklist.insert(address);
   }
@@ -576,7 +583,6 @@ public:
   }
 
   void SetInfoCacheState(const bool enabled) { info_cache_enabled = enabled; }
-
   void SetInfoCacheTime(const uint32_t time) { info_cache_time = time; }
 
   bool PopPacketFromSamplingQueue(packet_t &p) {
@@ -614,17 +620,17 @@ private:
     server_tags_t tags;
   };
 
-  enum class PacketType { Invalid = -1, Good, Info, Masterserver, Player };
+  enum class PacketType { Invalid = -1, Good, Info, Player };
 
   using recvfrom_t = ssize_t(SERVERSECURE_CALLING_CONVENTION *)(
       SOCKET, void *, recvlen_t, int32_t, sockaddr *, socklen_t *);
 
 #if defined SYSTEM_WINDOWS
   static constexpr char operating_system_char = 'w';
-#elif defined SYSTEM_POSIX
-  static constexpr char operating_system_char = 'l';
 #elif defined SYSTEM_MACOSX
   static constexpr char operating_system_char = 'm';
+#else
+  static constexpr char operating_system_char = 'l';
 #endif
 
   static constexpr size_t threaded_socket_max_buffer = 8192;
@@ -636,14 +642,10 @@ private:
 
   static constexpr size_t packet_sampling_max_queue = 50;
 
+  // Max size needed to contain a Steam authentication key (both server and client)
   static constexpr int16_t STEAM_KEYSIZE = 2048;
 
-  static constexpr int32_t PROTOCOL_AUTHCERTIFICATE = 0x01;
-  static constexpr int32_t PROTOCOL_HASHEDCDKEY = 0x02;
   static constexpr int32_t PROTOCOL_STEAM = 0x03;
-  static constexpr int32_t PROTOCOL_LASTVALID = 0x03;
-
-  static constexpr int32_t MAX_RANDOM_RANGE = 0x7FFFFFFFUL;
 
   IServer *server = nullptr;
   ISteamGameServer *gameserver = nullptr;
@@ -652,13 +654,12 @@ private:
   ConVar *sv_visiblemaxplayers = nullptr;
   ConVar *sv_location = nullptr;
 
-  SourceSDK::ModuleLoader dedicated_loader =
-      SourceSDK::ModuleLoader("dedicated");
+  SourceSDK::ModuleLoader dedicated_loader = SourceSDK::ModuleLoader("dedicated");
   SourceSDK::FactoryLoader server_loader = SourceSDK::FactoryLoader("server");
 
 #ifdef PLATFORM_WINDOWS
-  Detouring::Hook recvfrom_hook = Detouring::Hook(
-      "ws2_32", "recvfrom", reinterpret_cast<void *>(recvfrom_detour));
+  Detouring::Hook recvfrom_hook =
+      Detouring::Hook("ws2_32", "recvfrom", reinterpret_cast<void *>(recvfrom_detour));
 #else
   Detouring::Hook recvfrom_hook =
       Detouring::Hook("recvfrom", reinterpret_cast<void *>(recvfrom_detour));
@@ -682,8 +683,8 @@ private:
   bool info_cache_enabled = false;
   reply_info_t reply_info;
   std::array<char, 1024> info_cache_buffer{};
-  bf_write info_cache_packet = bf_write(
-      info_cache_buffer.data(), static_cast<int32_t>(info_cache_buffer.size()));
+  bf_write info_cache_packet =
+      bf_write(info_cache_buffer.data(), static_cast<int32_t>(info_cache_buffer.size()));
   uint32_t info_cache_last_update = 0;
   uint32_t info_cache_time = 5;
 
@@ -693,8 +694,10 @@ private:
   reply_player_t reply_player;
   std::array<char, 1024 * 5> player_cache_buffer{};
   bf_write player_cache_packet =
-      bf_write(player_cache_buffer.data(),
-               static_cast<int32_t>(player_cache_buffer.size()));
+      bf_write(player_cache_buffer.data(), static_cast<int32_t>(player_cache_buffer.size()));
+
+  // буфер для кастомного A2S_INFO с оверрайдом карты
+  std::array<char, 1024> custom_info_buffer{};
 
   ClientManager client_manager;
 
@@ -715,22 +718,24 @@ private:
     return str;
   }
 
-  // -------- Lua hook callers --------
+  // --------- Lua hooks ---------
 
+  // A2S_PLAYER → вернуть false, чтобы не слать, вернуть таблицу игроков для подмены,
+  // иначе (true/nil) — отдать дефолтный ответ сервера
   reply_player_t CallPlayerHook(const sockaddr_in &from) {
     reply_player_t players;
     players.dontsend = false;
     players.senddefault = true;
 
-    int initial_stack = server_lua->Top();
-    if (initial_stack > 0) {
+    if (server_lua == nullptr)
       return players;
-    }
 
-    char hook[] = "A2S_PLAYER";
+    int initial_stack = server_lua->Top();
+
+    char hook_name[] = "A2S_PLAYER";
     server_lua->GetField(GarrysMod::Lua::INDEX_GLOBAL, "hook");
     if (!server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE)) {
-      Warning("[gmsv_serversecure error] Global hook is not a table!\n");
+      Warning("[gmsv_serversecure] Global hook is not a table!\n");
       server_lua->Pop(1);
       return players;
     }
@@ -738,32 +743,34 @@ private:
     server_lua->GetField(-1, "Run");
     server_lua->Remove(-2);
     if (!server_lua->IsType(-1, GarrysMod::Lua::Type::FUNCTION)) {
-      Warning("[gmsv_serversecure error] Global hook.Run is not a function!\n");
+      Warning("[gmsv_serversecure] hook.Run is not a function!\n");
       server_lua->Pop(1);
       return players;
     }
 
-    server_lua->PushString(hook);
+    server_lua->PushString(hook_name);
     server_lua->PushString(IPToString(from.sin_addr));
-    server_lua->PushNumber(from.sin_port);
-    if (server_lua->PCall(3, 1, 0) != 0)
-      Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
+    server_lua->PushNumber(ntohs(from.sin_port));
+    if (server_lua->PCall(3, 1, 0) != 0) {
+      Warning("[gmsv_serversecure] A2S_PLAYER error: %s\n", server_lua->GetString());
+    }
 
     if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL)) {
       if (!server_lua->GetBool(-1)) {
         players.senddefault = false;
-        players.dontsend = true; // false => don't send anything
+        players.dontsend = true;
       }
     } else if (server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE)) {
       players.senddefault = false;
 
       int count = server_lua->ObjLen(-1);
+      if (count < 0) count = 0;
       players.count = static_cast<byte>(count);
 
-      std::vector<player_t> newPlayers(count);
+      std::vector<player_t> newPlayers(static_cast<size_t>(count));
 
       for (int i = 0; i < count; i++) {
-        player_t newPlayer;
+        player_t newPlayer{};
         newPlayer.index = static_cast<byte>(i);
 
         server_lua->PushNumber(i + 1);
@@ -782,77 +789,79 @@ private:
         server_lua->Pop(1);
 
         server_lua->Pop(1);
-        newPlayers.at(i) = newPlayer;
+        newPlayers.at(static_cast<size_t>(i)) = newPlayer;
       }
 
-      players.players = newPlayers;
+      players.players = std::move(newPlayers);
     }
 
     server_lua->Pop(1);
 
     if (server_lua->Top() != initial_stack) {
-      Warning("[gmsv_serversecure] Stack leak detected: %d -> %d",
+      Warning("[gmsv_serversecure] Stack leak detected in A2S_PLAYER: %d -> %d\n",
               initial_stack, server_lua->Top());
     }
 
     return players;
   }
 
+  // A2S_MAP → вернуть false, чтобы не слать, вернуть строку для оверрайда карты,
+  // иначе (true/nil) — дефолтный ответ
   reply_map_t CallMapHook(const sockaddr_in &from) {
-    reply_map_t out;
-    out.dontsend = false;
-    out.senddefault = true;
+    reply_map_t res;
+    res.dontsend = false;
+    res.senddefault = true;
+    res.map.clear();
+
+    if (server_lua == nullptr)
+      return res;
 
     int initial_stack = server_lua->Top();
-    if (initial_stack > 0) {
-      return out;
-    }
 
-    char hookname[] = "A2S_MAP";
+    char hook_name[] = "A2S_MAP";
     server_lua->GetField(GarrysMod::Lua::INDEX_GLOBAL, "hook");
     if (!server_lua->IsType(-1, GarrysMod::Lua::Type::TABLE)) {
-      Warning("[gmsv_serversecure error] Global hook is not a table!\n");
+      Warning("[gmsv_serversecure] Global hook is not a table!\n");
       server_lua->Pop(1);
-      return out;
+      return res;
     }
 
     server_lua->GetField(-1, "Run");
     server_lua->Remove(-2);
     if (!server_lua->IsType(-1, GarrysMod::Lua::Type::FUNCTION)) {
-      Warning("[gmsv_serversecure error] Global hook.Run is not a function!\n");
+      Warning("[gmsv_serversecure] hook.Run is not a function!\n");
       server_lua->Pop(1);
-      return out;
+      return res;
     }
 
-    server_lua->PushString(hookname);
+    server_lua->PushString(hook_name);
     server_lua->PushString(IPToString(from.sin_addr));
-    server_lua->PushNumber(from.sin_port);
-
+    server_lua->PushNumber(ntohs(from.sin_port));
     if (server_lua->PCall(3, 1, 0) != 0) {
-      Warning("[gmsv_serversecure error] %s\n", server_lua->GetString());
-    } else {
-      if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL)) {
-        if (!server_lua->GetBool(-1)) {
-          out.senddefault = false;
-          out.dontsend = true; // false => block reply
-        }
-      } else if (server_lua->IsType(-1, GarrysMod::Lua::Type::STRING)) {
-        out.senddefault = false;
-        out.map = server_lua->GetString(-1); // override map
+      Warning("[gmsv_serversecure] A2S_MAP error: %s\n", server_lua->GetString());
+    }
+
+    if (server_lua->IsType(-1, GarrysMod::Lua::Type::BOOL)) {
+      if (!server_lua->GetBool(-1)) {
+        res.senddefault = false;
+        res.dontsend = true;
       }
+    } else if (server_lua->IsType(-1, GarrysMod::Lua::Type::STRING)) {
+      res.senddefault = false;
+      res.map = server_lua->GetString(-1);
     }
 
     server_lua->Pop(1);
 
     if (server_lua->Top() != initial_stack) {
-      Warning("[gmsv_serversecure] Stack leak detected: %d -> %d",
+      Warning("[gmsv_serversecure] Stack leak detected in A2S_MAP: %d -> %d\n",
               initial_stack, server_lua->Top());
     }
 
-    return out;
+    return res;
   }
 
-  // -------- A2S senders --------
+  // --------- A2S helpers ---------
 
   PacketType SendInfoCache(const sockaddr_in &from, uint32_t time) {
     if (time - info_cache_last_update >= info_cache_time) {
@@ -867,7 +876,7 @@ private:
     DevMsg(2, "[ServerSecure] Handled %s info request using cache\n",
            IPToString(from.sin_addr));
 
-    return PacketType::Invalid; // handled here
+    return PacketType::Invalid; // handled
   }
 
   PacketType SendInfoChallenge(const sockaddr_in &from) {
@@ -875,27 +884,21 @@ private:
     *reinterpret_cast<uint32_t*>(challenge_pkt) = 0xFFFFFFFF;
     *reinterpret_cast<uint8_t*>(challenge_pkt + 4) = 'A';
     netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-    *reinterpret_cast<uint32_t*>(challenge_pkt + 4 + 1) =
+    *reinterpret_cast<uint32_t*>(challenge_pkt + 5) =
         CBaseServerProxy::Singleton->GetChallengeNr(net_addr);
+
     sendto(game_socket, reinterpret_cast<char *>(&challenge_pkt),
            sizeof(challenge_pkt), 0,
            reinterpret_cast<const sockaddr *>(&from), sizeof(from));
     return PacketType::Invalid;
   }
 
-  PacketType SendInfoWithCustomMap(const sockaddr_in &from, const char* map_override) {
-    std::array<char, 2048> buf{};
-    bf_write w(buf.data(), static_cast<int>(buf.size()));
-    if (!w.IsValid()) {
-      DevWarning("[ServerSecure] A2S_INFO buffer invalid\n");
-      return PacketType::Invalid;
-    }
-
+  // собрать и отправить A2S_INFO с кастомным названием карты
+  PacketType SendInfoWithCustomMap(const sockaddr_in &from, const char *map_override) {
     const char *server_name = server->GetName();
     const char *game_dir = reply_info.game_dir.c_str();
     const char *game_desc = reply_info.game_desc.c_str();
     const int32_t appid = engine_server->GetAppID();
-
     const int32_t num_clients = server->GetNumClients();
 
     int32_t max_players =
@@ -918,7 +921,6 @@ private:
 
     const char *game_version = reply_info.game_version.c_str();
     const int32_t udp_port = reply_info.udp_port;
-
     const CSteamID *sid = engine_server->GetGameServerSteamID();
     const uint64_t steamid = sid != nullptr ? sid->ConvertToUint64() : 0;
 
@@ -931,11 +933,14 @@ private:
     const std::string tags = ConcatenateTags(reply_info.tags);
     const bool has_tags = !tags.empty();
 
+    bf_write w(custom_info_buffer.data(),
+               static_cast<int32_t>(custom_info_buffer.size()));
+
     w.WriteLong(-1);
     w.WriteByte('I');
     w.WriteByte(default_proto_version);
     w.WriteString(server_name);
-    w.WriteString(map_override != nullptr ? map_override : "");
+    w.WriteString(map_override != nullptr ? map_override : server->GetMapName());
     w.WriteString(game_dir);
     w.WriteString(game_desc);
     w.WriteShort(appid);
@@ -955,59 +960,168 @@ private:
     }
     w.WriteLongLong(appid);
 
-    sendto(game_socket, reinterpret_cast<char*>(w.GetData()),
-           w.GetNumBytesWritten(), 0,
-           reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+    // Проверяем переполнение (bf_write не имеет IsValid())
+    if (w.IsOverflowed()) {
+      DevWarning("[ServerSecure] A2S_MAP: packet overflow (%d bytes)\n",
+                 w.GetNumBytesWritten());
+      return PacketType::Invalid;
+    }
 
-    DevMsg(2, "[ServerSecure] Handled %s A2S_INFO with map override: %s\n",
-           IPToString(from.sin_addr), map_override != nullptr ? map_override : "(null)");
+    sendto(game_socket,
+           reinterpret_cast<char*>(w.GetData()),
+           w.GetNumBytesWritten(),
+           0,
+           reinterpret_cast<const sockaddr*>(&from),
+           sizeof(from));
 
-    return PacketType::Invalid;
+    DevMsg(2, "[ServerSecure] Handled %s info request with custom map\n",
+           IPToString(from.sin_addr));
+
+    return PacketType::Invalid; // handled
   }
 
-  // -------- Handlers --------
+  // main classifier → Info / Player / Good/Invalid
+  PacketType ClassifyPacket(const uint8_t *data, int32_t len,
+                            const sockaddr_in &from) {
+    if (len == 0) {
+      DevWarning("[ServerSecure] Bad OOB! len: %d from %s\n", len,
+                 IPToString(from.sin_addr));
+      return PacketType::Invalid;
+    }
+
+    if (len < 5) {
+      return PacketType::Good;
+    }
+
+    bf_read packet(data, len);
+    const auto channel = static_cast<int32_t>(packet.ReadLong());
+    if (channel == -2) {
+      DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X from %s\n",
+                 len, channel, IPToString(from.sin_addr));
+      return PacketType::Invalid;
+    }
+
+    if (channel != -1) {
+      return PacketType::Good;
+    }
+
+    const auto type = static_cast<uint8_t>(packet.ReadByte());
+
+    if (packet_validation_enabled) {
+      switch (type) {
+      case 'W': // server challenge request
+      case 's': // master server challenge
+        if (len > 100) {
+          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c from %s\n",
+                     len, channel, type, IPToString(from.sin_addr));
+          return PacketType::Invalid;
+        }
+        return PacketType::Good;
+
+      case 'T': // A2S_INFO
+        if ((len != 25 && len != 29 && len != 1200) ||
+            strncmp(reinterpret_cast<const char *>(data + 5),
+                    "Source Engine Query", 19) != 0) {
+          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c from %s\n",
+                     len, channel, type, IPToString(from.sin_addr));
+          return PacketType::Invalid;
+        }
+        return PacketType::Info;
+
+      case 'U': // A2S_PLAYER
+        return PacketType::Player;
+
+      case 'V': // A2S_RULES
+        if (len != 9 && len != 1200) {
+          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c from %s\n",
+                     len, channel, type, IPToString(from.sin_addr));
+          return PacketType::Invalid;
+        }
+        return PacketType::Good;
+
+      case 'q': // connection handshake init
+        return PacketType::Good;
+
+      case 'k': // steam auth
+      {
+        const int32_t protocol = packet.ReadLong();
+        if (protocol != default_netproto_version) {
+          DevWarning("[ServerSecure] Bad protocol number from %s\n",
+                     IPToString(from.sin_addr));
+          return PacketType::Invalid;
+        }
+
+        const int32_t authProtocol = packet.ReadLong();
+        if (authProtocol != PROTOCOL_STEAM) {
+          DevWarning("[ServerSecure] Bad authentication protocol from %s\n",
+                     IPToString(from.sin_addr));
+          return PacketType::Invalid;
+        }
+
+        const int32_t challengeNr = packet.ReadLong();
+
+        netadr_t netaddr{};
+        netaddr.SetFromSockadr(reinterpret_cast<const sockaddr *>(&from));
+        if (!CheckChallengeNr(netaddr, challengeNr)) {
+          DevWarning("[ServerSecure] Bad connection challenge from %s\n",
+                     IPToString(from.sin_addr));
+          return PacketType::Invalid;
+        }
+
+        const auto time = static_cast<uint32_t>(Plat_FloatTime());
+        const auto rate_limit = client_manager.CheckIPRate(from.sin_addr.s_addr, time);
+        if (rate_limit != ClientManager::RateLimitType::None) {
+          return PacketType::Invalid;
+        }
+
+        // skip rest
+        return PacketType::Good;
+      }
+
+      default:
+        DevWarning("[ServerSecure] Bad OOB type: %c\n", type);
+        return PacketType::Invalid;
+      }
+    }
+
+    return type == 'T' ? PacketType::Info
+                       : (type == 'U' ? PacketType::Player : PacketType::Good);
+  }
 
   PacketType HandleInfoQuery(const uint8_t* buffer,
                              ssize_t length,
                              const sockaddr_in &from) {
     const auto time = static_cast<uint32_t>(Plat_FloatTime());
-    const auto rate_limit =
-        client_manager.CheckIPRate(from.sin_addr.s_addr, time);
+    const auto rate_limit = client_manager.CheckIPRate(from.sin_addr.s_addr, time);
     if (rate_limit != ClientManager::RateLimitType::None) {
       DevWarning("[ServerSecure] Client %s hit %s rate limit\n",
                  IPToString(from.sin_addr),
-                 rate_limit == ClientManager::RateLimitType::Individual
-                     ? "individual"
-                     : "global");
+                 rate_limit == ClientManager::RateLimitType::Individual ? "individual" : "global");
       return PacketType::Invalid;
     }
 
-    // Lua: should we override/block/default?
-    reply_map_t ch_map = CallMapHook(from);
+    // If no challenge provided (25 bytes), reply with 'A' challenge
+    if (length == 25) {
+      return SendInfoChallenge(from);
+    }
 
-    // challenge handling: 25 => request challenge, 29 => with challenge
-    auto need_challenge_handling = [&](void)->bool {
-      return (length == 25 || length == 29);
-    };
-
-    if (need_challenge_handling()) {
-      if (length == 25) {
-        return SendInfoChallenge(from);
-      }
-      constexpr ssize_t CHALLENGE_OFFSET = 4 + 1 + 20;
+    // If challenge provided (29 or junk with 1200), verify
+    constexpr ssize_t CHALLENGE_OFFSET = 4 + 1 + 19 + 1; // -1, 'T', "Source Engine Query", '\0'
+    if (length >= CHALLENGE_OFFSET + 4) {
       uint32_t challenge = *reinterpret_cast<const uint32_t*>(buffer + CHALLENGE_OFFSET);
       netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-      if (!CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, challenge)) {
+      if (!CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, static_cast<int>(challenge))) {
         return SendInfoChallenge(from);
       }
     }
 
-    if (ch_map.dontsend) {
+    // Map override hook
+    const reply_map_t map_res = CallMapHook(from);
+    if (map_res.dontsend) {
       return PacketType::Invalid;
     }
-
-    if (!ch_map.senddefault && !ch_map.map.empty()) {
-      return SendInfoWithCustomMap(from, ch_map.map.c_str());
+    if (!map_res.senddefault) {
+      return SendInfoWithCustomMap(from, map_res.map.c_str());
     }
 
     if (info_cache_enabled) {
@@ -1017,18 +1131,15 @@ private:
     return PacketType::Good;
   }
 
-  PacketType HandlePlayerQuery(const uint8_t* buffer,
-                               ssize_t length,
+  PacketType HandlePlayerQuery(const uint8_t* /*buffer*/,
+                               ssize_t /*length*/,
                                const sockaddr_in &from) {
     const auto time = static_cast<uint32_t>(Plat_FloatTime());
-    const auto rate_limit =
-        client_manager.CheckIPRate(from.sin_addr.s_addr, time);
+    const auto rate_limit = client_manager.CheckIPRate(from.sin_addr.s_addr, time);
     if (rate_limit != ClientManager::RateLimitType::None) {
       DevWarning("[ServerSecure] Client %s hit %s rate limit\n",
                  IPToString(from.sin_addr),
-                 rate_limit == ClientManager::RateLimitType::Individual
-                     ? "individual"
-                     : "global");
+                 rate_limit == ClientManager::RateLimitType::Individual ? "individual" : "global");
       return PacketType::Invalid;
     }
 
@@ -1059,197 +1170,21 @@ private:
     return PacketType::Invalid;
   }
 
-  PacketType ClassifyPacket(const uint8_t *data, int32_t len,
-                            const sockaddr_in &from) {
-    if (len == 0) {
-      DevWarning("[ServerSecure] Bad OOB! len: %d from %s\n", len,
-                 IPToString(from.sin_addr));
-      return PacketType::Invalid;
-    }
-
-    if (len < 5) {
-      return PacketType::Good;
-    }
-
-    bf_read packet(data, len);
-    const auto channel = static_cast<int32_t>(packet.ReadLong());
-    if (channel == -2) {
-      DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X from %s\n",
-                 len, channel, IPToString(from.sin_addr));
-      return PacketType::Invalid;
-    }
-
-    if (channel != -1) {
-      return PacketType::Good;
-    }
-
-    const auto type = static_cast<uint8_t>(packet.ReadByte());
-
-    DevWarning("[ServerSecure] Received! len: %d, channel: 0x%X, type: %c "
-               "from %s\n",
-               len, channel, type, IPToString(from.sin_addr));
-
-    if (packet_validation_enabled) {
-      switch (type) {
-      case 'W': // server challenge request
-      case 's': // master server challenge
-        if (len > 100) {
-          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c "
-                     "from %s\n",
-                     len, channel, type, IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        if (len >= 18 && strncmp(reinterpret_cast<const char *>(data + 5),
-                                 "statusResponse", 14) == 0) {
-          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c "
-                     "from %s\n",
-                     len, channel, type, IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        return PacketType::Good;
-
-      case 'T': // A2S_INFO
-        if ((len != 25 && len != 29 && len != 1200) ||
-            strncmp(reinterpret_cast<const char *>(data + 5),
-                    "Source Engine Query", 19) != 0) {
-          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c "
-                     "from %s\n",
-                     len, channel, type, IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        return PacketType::Info;
-
-      case 'U': // A2S_PLAYER
-        return PacketType::Player;
-
-      case 'V': // A2S_RULES (оставляем по-умолчанию)
-        if (len != 9 && len != 1200) {
-          DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c "
-                     "from %s\n",
-                     len, channel, type, IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-        return PacketType::Good;
-
-      case 'q': // connection handshake init
-        DevMsg(2,
-               "[ServerSecure] Good OOB! len: %d, channel: 0x%X, type: %c from "
-               "%s\n",
-               len, channel, type, IPToString(from.sin_addr));
-        return PacketType::Good;
-
-      case 'k': // steam auth packet
-      {
-        const int32_t protocol = packet.ReadLong();
-        if (protocol != default_netproto_version) {
-          DevWarning("[ServerSecure] Bad protocol number from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const int32_t authProtocol = packet.ReadLong();
-        if (authProtocol != PROTOCOL_STEAM) {
-          DevWarning("[ServerSecure] Bad authentication protocol from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const int32_t challengeNr = packet.ReadLong();
-
-        netadr_t netaddr{};
-        netaddr.SetFromSockadr(reinterpret_cast<const sockaddr *>(&from));
-        if (!CheckChallengeNr(netaddr, challengeNr)) {
-          DevWarning("[ServerSecure] Bad connection challenge from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const auto time = static_cast<uint32_t>(Plat_FloatTime());
-        const auto rate_limit =
-            client_manager.CheckIPRate(from.sin_addr.s_addr, time);
-        if (rate_limit != ClientManager::RateLimitType::None) {
-          DevWarning("[ServerSecure] Client %s hit %s rate limit\n",
-                     IPToString(from.sin_addr),
-                     rate_limit == ClientManager::RateLimitType::Individual
-                         ? "individual"
-                         : "global");
-          return PacketType::Invalid;
-        }
-
-        packet.ReadLong(); // client challenge
-
-        char name[256] = {0};
-        packet.ReadString(name, sizeof(name));
-
-        char password[256] = {0};
-        packet.ReadString(password, sizeof(password));
-
-        char productVersion[32] = {0};
-        packet.ReadString(productVersion, sizeof(productVersion));
-
-        const int32_t nVersionCheck =
-            reply_info.game_version.compare(productVersion);
-        if (nVersionCheck > 0) {
-          DevWarning("[ServerSecure] Old game version from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        } else if (nVersionCheck < 0) {
-          DevWarning("[ServerSecure] Newer game version from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const int32_t keyLen = packet.ReadShort();
-        if (keyLen < 0 || keyLen > STEAM_KEYSIZE ||
-            packet.GetNumBytesLeft() < keyLen) {
-          DevWarning("[ServerSecure] Bad Steam key from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        DevMsg(2,
-               "[ServerSecure] Good OOB! len: %d, channel: 0x%X, type: %c from "
-               "%s\n",
-               len, channel, type, IPToString(from.sin_addr));
-        return PacketType::Good;
-      }
-
-      default:
-        break;
-      }
-
-      DevWarning(
-          "[ServerSecure] Bad OOB! len: %d, channel: 0x%X, type: %c from %s\n",
-          len, channel, type, IPToString(from.sin_addr));
-      return PacketType::Invalid;
-    }
-
-    return type == 'T' ? PacketType::Info
-                       : (type == 'U' ? PacketType::Player : PacketType::Good);
-  }
-
   bool IsAddressAllowed(const sockaddr_in &addr) {
     return (!firewall_whitelist_enabled ||
-            firewall_whitelist.find(addr.sin_addr.s_addr) !=
-                firewall_whitelist.end()) &&
+            firewall_whitelist.find(addr.sin_addr.s_addr) != firewall_whitelist.end()) &&
            (!firewall_blacklist_enabled ||
-            firewall_blacklist.find(addr.sin_addr.s_addr) ==
-                firewall_blacklist.end());
+            firewall_blacklist.find(addr.sin_addr.s_addr) == firewall_blacklist.end());
   }
 
   static int32_t HandleNetError(int32_t value) {
     if (value == -1) {
-
 #if defined SYSTEM_WINDOWS
       WSASetLastError(WSAEWOULDBLOCK);
 #elif defined SYSTEM_POSIX
       errno = EWOULDBLOCK;
 #endif
     }
-
     return value;
   }
 
@@ -1260,11 +1195,9 @@ private:
 
   bool PopPacketFromQueue(packet_t &p) {
     AUTO_LOCK(threaded_socket_mutex);
-
     if (threaded_socket_queue.empty()) {
       return false;
     }
-
     p = std::move(threaded_socket_queue.front());
     threaded_socket_queue.pop();
     return true;
@@ -1294,10 +1227,6 @@ private:
     }
 
     const ssize_t len = trampoline(s, buf, buflen, flags, from, fromlen);
-    DevMsg(3,
-           "[ServerSecure] Called recvfrom on socket %" PRIiSOCKET
-           " and received %" PRIiSSIZE " bytes\n",
-           s, len);
     if (len == -1) {
       return -1;
     }
@@ -1308,26 +1237,19 @@ private:
       std::memcpy(&p.address, from, *fromlen);
       p.address_size = *fromlen;
       p.buffer.assign(buffer, buffer + len);
-
       PushPacketToSamplingQueue(std::move(p));
     }
 
     const sockaddr_in &infrom = *reinterpret_cast<sockaddr_in *>(from);
     if (!IsAddressAllowed(infrom)) {
-      DevWarning("[ServerSecure] Blocked packet from %s\n",
-                 IPToString(infrom.sin_addr));
+      DevWarning("[ServerSecure] Blocked packet from %s\n", IPToString(infrom.sin_addr));
       return -1;
     }
 
-    DevMsg(3, "[ServerSecure] Address %s was allowed\n",
-           IPToString(infrom.sin_addr));
-
-    PacketType type = ClassifyPacket(buffer, len, infrom);
+    PacketType type = ClassifyPacket(buffer, static_cast<int32_t>(len), infrom);
     if (type == PacketType::Info) {
       type = HandleInfoQuery(buffer, len, infrom);
-    }
-
-    if (type == PacketType::Player) {
+    } else if (type == PacketType::Player) {
       type = HandlePlayerQuery(buffer, len, infrom);
     }
 
@@ -1337,19 +1259,11 @@ private:
   ssize_t HandleDetour(SOCKET s, void *buf, recvlen_t buflen, int32_t flags,
                        sockaddr *from, socklen_t *fromlen) {
     if (s != game_socket) {
-      DevMsg(4,
-             "[ServerSecure] recvfrom detour called with socket %d, passing "
-             "through\n",
-             s);
       auto trampoline = recvfrom_hook.GetTrampoline<recvfrom_t>();
       return trampoline != nullptr
                  ? trampoline(s, buf, buflen, flags, from, fromlen)
                  : -1;
     }
-
-    DevMsg(4,
-           "[ServerSecure] recvfrom detour called with socket %d, detouring\n",
-           s);
 
     packet_t p;
     const bool has_packet = PopPacketFromQueue(p);
@@ -1378,7 +1292,6 @@ private:
   uintp HandleThread() {
     while (threaded_socket_execute) {
       if (IsPacketQueueFull()) {
-        DevWarning("[ServerSecure] Packet queue is full, sleeping for 100ms\n");
         ThreadSleep(100);
         continue;
       }
@@ -1393,8 +1306,6 @@ private:
         continue;
       }
 
-      DevMsg(3, "[ServerSecure] Select passed\n");
-
       packet_t p;
       p.buffer.resize(threaded_socket_max_buffer);
       const ssize_t len = ReceiveAndAnalyzePacket(
@@ -1405,10 +1316,7 @@ private:
         continue;
       }
 
-      DevMsg(3, "[ServerSecure] Pushing packet to queue\n");
-
       p.buffer.resize(static_cast<size_t>(len));
-
       PushPacketToQueue(std::move(p));
     }
 
@@ -1417,33 +1325,19 @@ private:
 
   static void SetThreadName() {
 #ifdef SYSTEM_WINDOWS
-
     using SetThreadDescription_t = decltype(&SetThreadDescription);
-
     const HMODULE kernel_base_module = GetModuleHandle("KernelBase.dll");
-    if (kernel_base_module != nullptr) {
-      return;
-    }
-
+    if (kernel_base_module == nullptr) return;
     const auto SetThreadDescription_p =
         reinterpret_cast<SetThreadDescription_t>(
             GetProcAddress(kernel_base_module, "SetThreadDescription"));
-    if (SetThreadDescription_p == nullptr) {
-      return;
-    }
-
+    if (SetThreadDescription_p == nullptr) return;
     SetThreadDescription_p(GetCurrentThread(),
                            L"serversecure packet receiver/analyzer");
-
 #elif SYSTEM_LINUX
-
-    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("serversecure"), 0, 0,
-          0);
-
+    prctl(PR_SET_NAME, reinterpret_cast<unsigned long>("serversecure"), 0, 0, 0);
 #elif SYSTEM_MACOSX
-
     pthread_setname_np("serversecure");
-
 #endif
   }
 
@@ -1454,6 +1348,8 @@ private:
 };
 
 std::unique_ptr<Core> Core::Singleton;
+
+// ---------- Lua-exposed functions (как и раньше) ----------
 
 LUA_FUNCTION_STATIC(EnableFirewallWhitelist) {
   LUA->CheckType(1, GarrysMod::Lua::Type::Bool);
@@ -1571,16 +1467,11 @@ LUA_FUNCTION_STATIC(GetSamplePacket) {
   return 3;
 }
 
-static bool CheckChallengeNr(const netadr_t &adr, const int nChallengeValue) {
-  if (!CBaseServerProxy::Singleton) {
-    return false;
-  }
-
-  return CBaseServerProxy::Singleton->CheckChallengeNr(adr, nChallengeValue);
-}
+// ---------- entry points ----------
 
 void Initialize(GarrysMod::Lua::ILuaBase *LUA) {
   server_lua = LUA;
+
   LUA->GetField(GarrysMod::Lua::INDEX_GLOBAL, "VERSION");
   const char *game_version = LUA->CheckString(-1);
 
@@ -1604,63 +1495,34 @@ void Initialize(GarrysMod::Lua::ILuaBase *LUA) {
         std::make_unique<CBaseServerProxy>(baseserver);
   }
 
-  LUA->PushCFunction(EnableFirewallWhitelist);
-  LUA->SetField(-2, "EnableFirewallWhitelist");
+  LUA->PushCFunction(EnableFirewallWhitelist);   LUA->SetField(-2, "EnableFirewallWhitelist");
+  LUA->PushCFunction(AddWhitelistIP);            LUA->SetField(-2, "AddWhitelistIP");
+  LUA->PushCFunction(RemoveWhitelistIP);         LUA->SetField(-2, "RemoveWhitelistIP");
+  LUA->PushCFunction(ResetWhitelist);            LUA->SetField(-2, "ResetWhitelist");
 
-  LUA->PushCFunction(AddWhitelistIP);
-  LUA->SetField(-2, "AddWhitelistIP");
+  LUA->PushCFunction(EnableFirewallBlacklist);   LUA->SetField(-2, "EnableFirewallBlacklist");
+  LUA->PushCFunction(AddBlacklistIP);            LUA->SetField(-2, "AddBlacklistIP");
+  LUA->PushCFunction(RemoveBlacklistIP);         LUA->SetField(-2, "RemoveBlacklistIP");
+  LUA->PushCFunction(ResetBlacklist);            LUA->SetField(-2, "ResetBlacklist");
 
-  LUA->PushCFunction(RemoveWhitelistIP);
-  LUA->SetField(-2, "RemoveWhitelistIP");
+  LUA->PushCFunction(EnablePacketValidation);    LUA->SetField(-2, "EnablePacketValidation");
 
-  LUA->PushCFunction(ResetWhitelist);
-  LUA->SetField(-2, "ResetWhitelist");
+  LUA->PushCFunction(EnableInfoCache);           LUA->SetField(-2, "EnableInfoCache");
+  LUA->PushCFunction(SetInfoCacheTime);          LUA->SetField(-2, "SetInfoCacheTime");
+  LUA->PushCFunction(RefreshInfoCache);          LUA->SetField(-2, "RefreshInfoCache");
 
-  LUA->PushCFunction(EnableFirewallBlacklist);
-  LUA->SetField(-2, "EnableFirewallBlacklist");
+  LUA->PushCFunction(EnableQueryLimiter);        LUA->SetField(-2, "EnableQueryLimiter");
+  LUA->PushCFunction(SetMaxQueriesWindow);       LUA->SetField(-2, "SetMaxQueriesWindow");
+  LUA->PushCFunction(SetMaxQueriesPerSecond);    LUA->SetField(-2, "SetMaxQueriesPerSecond");
+  LUA->PushCFunction(SetGlobalMaxQueriesPerSecond); LUA->SetField(-2, "SetGlobalMaxQueriesPerSecond");
 
-  LUA->PushCFunction(AddBlacklistIP);
-  LUA->SetField(-2, "AddBlacklistIP");
-
-  LUA->PushCFunction(RemoveBlacklistIP);
-  LUA->SetField(-2, "RemoveBlacklistIP");
-
-  LUA->PushCFunction(ResetBlacklist);
-  LUA->SetField(-2, "ResetBlacklist");
-
-  LUA->PushCFunction(EnablePacketValidation);
-  LUA->SetField(-2, "EnablePacketValidation");
-
-  LUA->PushCFunction(EnableInfoCache);
-  LUA->SetField(-2, "EnableInfoCache");
-
-  LUA->PushCFunction(SetInfoCacheTime);
-  LUA->SetField(-2, "SetInfoCacheTime");
-
-  LUA->PushCFunction(RefreshInfoCache);
-  LUA->SetField(-2, "RefreshInfoCache");
-
-  LUA->PushCFunction(EnableQueryLimiter);
-  LUA->SetField(-2, "EnableQueryLimiter");
-
-  LUA->PushCFunction(SetMaxQueriesWindow);
-  LUA->SetField(-2, "SetMaxQueriesWindow");
-
-  LUA->PushCFunction(SetMaxQueriesPerSecond);
-  LUA->SetField(-2, "SetMaxQueriesPerSecond");
-
-  LUA->PushCFunction(SetGlobalMaxQueriesPerSecond);
-  LUA->SetField(-2, "SetGlobalMaxQueriesPerSecond");
-
-  LUA->PushCFunction(EnablePacketSampling);
-  LUA->SetField(-2, "EnablePacketSampling");
-
-  LUA->PushCFunction(GetSamplePacket);
-  LUA->SetField(-2, "GetSamplePacket");
+  LUA->PushCFunction(EnablePacketSampling);      LUA->SetField(-2, "EnablePacketSampling");
+  LUA->PushCFunction(GetSamplePacket);           LUA->SetField(-2, "GetSamplePacket");
 }
 
 void Deinitialize() {
   CBaseServerProxy::Singleton.reset();
   Core::Singleton.reset();
 }
+
 } // namespace netfilter
