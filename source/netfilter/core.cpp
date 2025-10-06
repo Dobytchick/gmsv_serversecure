@@ -25,6 +25,7 @@
 #include <threadtools.h>
 #include <utlvector.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cinttypes>
@@ -66,15 +67,14 @@ using recvlen_t = int32_t;
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <pthread.h>
 
 #if defined SYSTEM_LINUX
 
 #include <sys/prctl.h>
 
 #elif defined SYSTEM_MACOSX
-
-#include <pthread.h>
-
+// pthread already included above for POSIX
 #endif
 
 typedef int32_t SOCKET;
@@ -110,6 +110,15 @@ struct reply_player_t {
 };
 
 GarrysMod::Lua::ILuaBase *server_lua = nullptr;
+
+// -------- main thread guard --------
+#if defined(SYSTEM_WINDOWS)
+static DWORD g_main_tid = 0;
+static inline bool InMainThread() { return GetCurrentThreadId() == g_main_tid; }
+#else
+static pthread_t g_main_tid;
+static inline bool InMainThread() { return pthread_equal(pthread_self(), g_main_tid); }
+#endif
 
 namespace netfilter {
 
@@ -159,7 +168,10 @@ public:
     hasher.Final();
     SHADigest_t hash = {0};
     hasher.GetHash(hash);
-    if (reinterpret_cast<int *>(hash)[0] == nChallengeValue) {
+
+    int hv = 0;
+    std::memcpy(&hv, hash, sizeof(hv));
+    if (hv == nChallengeValue) {
       return true;
     }
 
@@ -171,7 +183,9 @@ public:
                   sizeof(uint32_t) * m_previous_challenge.size());
     hasher.Final();
     hasher.GetHash(hash);
-    return reinterpret_cast<int *>(hash)[0] == nChallengeValue;
+    hv = 0;
+    std::memcpy(&hv, hash, sizeof(hv));
+    return hv == nChallengeValue;
   }
 
   virtual int GetChallengeNr(netadr_t &adr) {
@@ -185,7 +199,9 @@ public:
     hasher.Final();
     SHADigest_t hash = {0};
     hasher.GetHash(hash);
-    return reinterpret_cast<int *>(hash)[0];
+    int hv = 0;
+    std::memcpy(&hv, hash, sizeof(hv));
+    return hv;
   }
 
   static void UpdateChallengeIfNeeded() {
@@ -727,7 +743,8 @@ private:
     players.dontsend = false;
     players.senddefault = true;
 
-    if (server_lua == nullptr)
+    // only in main thread with valid lua
+    if (server_lua == nullptr || !InMainThread())
       return players;
 
     int initial_stack = server_lua->Top();
@@ -813,7 +830,7 @@ private:
     res.senddefault = true;
     res.map.clear();
 
-    if (server_lua == nullptr)
+    if (server_lua == nullptr || !InMainThread())
       return res;
 
     int initial_stack = server_lua->Top();
@@ -881,13 +898,15 @@ private:
 
   PacketType SendInfoChallenge(const sockaddr_in &from) {
     uint8_t challenge_pkt[4 + 1 + 4] {0};
-    *reinterpret_cast<uint32_t*>(challenge_pkt) = 0xFFFFFFFF;
-    *reinterpret_cast<uint8_t*>(challenge_pkt + 4) = 'A';
+    const uint32_t header = 0xFFFFFFFFu;
+    std::memcpy(challenge_pkt + 0, &header, sizeof(header));
+    challenge_pkt[4] = 'A';
     netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-    *reinterpret_cast<uint32_t*>(challenge_pkt + 5) =
-        CBaseServerProxy::Singleton->GetChallengeNr(net_addr);
+    const uint32_t chal =
+        static_cast<uint32_t>(CBaseServerProxy::Singleton->GetChallengeNr(net_addr));
+    std::memcpy(challenge_pkt + 5, &chal, sizeof(chal));
 
-    sendto(game_socket, reinterpret_cast<char *>(&challenge_pkt),
+    sendto(game_socket, reinterpret_cast<char *>(challenge_pkt),
            sizeof(challenge_pkt), 0,
            reinterpret_cast<const sockaddr *>(&from), sizeof(from));
     return PacketType::Invalid;
@@ -960,7 +979,7 @@ private:
     }
     w.WriteLongLong(appid);
 
-    // Проверяем переполнение (bf_write не имеет IsValid())
+    // Проверяем переполнение
     if (w.IsOverflowed()) {
       DevWarning("[ServerSecure] A2S_MAP: packet overflow (%d bytes)\n",
                  w.GetNumBytesWritten());
@@ -1108,7 +1127,8 @@ private:
     // If challenge provided (29 or junk with 1200), verify
     constexpr ssize_t CHALLENGE_OFFSET = 4 + 1 + 19 + 1; // -1, 'T', "Source Engine Query", '\0'
     if (length >= CHALLENGE_OFFSET + 4) {
-      uint32_t challenge = *reinterpret_cast<const uint32_t*>(buffer + CHALLENGE_OFFSET);
+      uint32_t challenge = 0;
+      std::memcpy(&challenge, buffer + CHALLENGE_OFFSET, sizeof(challenge));
       netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
       if (!CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, static_cast<int>(challenge))) {
         return SendInfoChallenge(from);
@@ -1218,9 +1238,10 @@ private:
     packet_sampling_queue.emplace(std::move(p));
   }
 
-  ssize_t ReceiveAndAnalyzePacket(SOCKET s, void *buf, recvlen_t buflen,
-                                  int32_t flags, sockaddr *from,
-                                  socklen_t *fromlen) {
+  // Только получить пакет с сокета (без анализа/хуков)
+  ssize_t ReceivePacket(SOCKET s, void *buf, recvlen_t buflen,
+                        int32_t flags, sockaddr *from,
+                        socklen_t *fromlen) {
     auto trampoline = recvfrom_hook.GetTrampoline<recvfrom_t>();
     if (trampoline == nullptr) {
       return -1;
@@ -1231,29 +1252,7 @@ private:
       return -1;
     }
 
-    const uint8_t *buffer = reinterpret_cast<uint8_t *>(buf);
-    if (packet_sampling_enabled) {
-      packet_t p;
-      std::memcpy(&p.address, from, *fromlen);
-      p.address_size = *fromlen;
-      p.buffer.assign(buffer, buffer + len);
-      PushPacketToSamplingQueue(std::move(p));
-    }
-
-    const sockaddr_in &infrom = *reinterpret_cast<sockaddr_in *>(from);
-    if (!IsAddressAllowed(infrom)) {
-      DevWarning("[ServerSecure] Blocked packet from %s\n", IPToString(infrom.sin_addr));
-      return -1;
-    }
-
-    PacketType type = ClassifyPacket(buffer, static_cast<int32_t>(len), infrom);
-    if (type == PacketType::Info) {
-      type = HandleInfoQuery(buffer, len, infrom);
-    } else if (type == PacketType::Player) {
-      type = HandlePlayerQuery(buffer, len, infrom);
-    }
-
-    return type != PacketType::Invalid ? len : -1;
+    return len;
   }
 
   ssize_t HandleDetour(SOCKET s, void *buf, recvlen_t buflen, int32_t flags,
@@ -1271,10 +1270,40 @@ private:
       return HandleNetError(-1);
     }
 
+    // --- Классификация и хуки ТЕПЕРЬ здесь (главный поток) ---
+    const sockaddr_in &infrom = *reinterpret_cast<sockaddr_in *>(&p.address);
+
+    if (!IsAddressAllowed(infrom)) {
+      DevWarning("[ServerSecure] Blocked packet from %s\n", IPToString(infrom.sin_addr));
+      return HandleNetError(-1);
+    }
+
+    PacketType type = ClassifyPacket(p.buffer.data(),
+                                     static_cast<int32_t>(p.buffer.size()),
+                                     infrom);
+    if (type == PacketType::Info) {
+      type = HandleInfoQuery(p.buffer.data(),
+                             static_cast<ssize_t>(p.buffer.size()),
+                             infrom);
+    } else if (type == PacketType::Player) {
+      type = HandlePlayerQuery(p.buffer.data(),
+                               static_cast<ssize_t>(p.buffer.size()),
+                               infrom);
+    }
+
+    // Для sampling — уже после классификации (чтобы видеть только «живые» пакеты)
+    if (packet_sampling_enabled && type != PacketType::Invalid) {
+      packet_t cp = p;
+      PushPacketToSamplingQueue(std::move(cp));
+    }
+
+    if (type == PacketType::Invalid) {
+      return HandleNetError(-1);
+    }
+
     const ssize_t len = (std::min)(static_cast<ssize_t>(p.buffer.size()),
                                    static_cast<ssize_t>(buflen));
-    p.buffer.resize(static_cast<size_t>(len));
-    std::copy(p.buffer.begin(), p.buffer.end(), static_cast<uint8_t *>(buf));
+    std::memcpy(buf, p.buffer.data(), static_cast<size_t>(len));
 
     const socklen_t addrlen = (std::min)(*fromlen, p.address_size);
     std::memcpy(from, &p.address, static_cast<size_t>(addrlen));
@@ -1308,7 +1337,7 @@ private:
 
       packet_t p;
       p.buffer.resize(threaded_socket_max_buffer);
-      const ssize_t len = ReceiveAndAnalyzePacket(
+      const ssize_t len = ReceivePacket(
           game_socket, p.buffer.data(),
           static_cast<recvlen_t>(threaded_socket_max_buffer), 0,
           reinterpret_cast<sockaddr *>(&p.address), &p.address_size);
@@ -1471,6 +1500,13 @@ LUA_FUNCTION_STATIC(GetSamplePacket) {
 
 void Initialize(GarrysMod::Lua::ILuaBase *LUA) {
   server_lua = LUA;
+
+  // main thread id
+#if defined(SYSTEM_WINDOWS)
+  g_main_tid = GetCurrentThreadId();
+#else
+  g_main_tid = pthread_self();
+#endif
 
   LUA->GetField(GarrysMod::Lua::INDEX_GLOBAL, "VERSION");
   const char *game_version = LUA->CheckString(-1);
