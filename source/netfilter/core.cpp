@@ -902,8 +902,9 @@ private:
     std::memcpy(challenge_pkt + 0, &header, sizeof(header));
     challenge_pkt[4] = 'A';
     netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-    const uint32_t chal =
-        static_cast<uint32_t>(CBaseServerProxy::Singleton->GetChallengeNr(net_addr));
+    const uint32_t chal = CBaseServerProxy::Singleton
+        ? static_cast<uint32_t>(CBaseServerProxy::Singleton->GetChallengeNr(net_addr))
+        : 0xFFFFFFFFu;
     std::memcpy(challenge_pkt + 5, &chal, sizeof(chal));
 
     sendto(game_socket, reinterpret_cast<char *>(challenge_pkt),
@@ -1130,7 +1131,8 @@ private:
       uint32_t challenge = 0;
       std::memcpy(&challenge, buffer + CHALLENGE_OFFSET, sizeof(challenge));
       netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-      if (!CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, static_cast<int>(challenge))) {
+      if (CBaseServerProxy::Singleton &&
+          !CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, static_cast<int>(challenge))) {
         return SendInfoChallenge(from);
       }
     }
@@ -1525,11 +1527,13 @@ void Initialize(GarrysMod::Lua::ILuaBase *LUA) {
 
   LUA->Pop(1);
 
-  auto *baseserver = dynamic_cast<CBaseServer *>(InterfacePointers::Server());
-  if (baseserver != nullptr) {
-    CBaseServerProxy::Singleton =
-        std::make_unique<CBaseServerProxy>(baseserver);
-  }
+  // Temporarily disabled: GMod update may have changed CBaseServer vtable,
+  // causing hooks to land on wrong functions. Re-enable after verifying offsets.
+  // auto *baseserver = dynamic_cast<CBaseServer *>(InterfacePointers::Server());
+  // if (baseserver != nullptr) {
+  //   CBaseServerProxy::Singleton =
+  //       std::make_unique<CBaseServerProxy>(baseserver);
+  // }
 
   LUA->PushCFunction(EnableFirewallWhitelist);   LUA->SetField(-2, "EnableFirewallWhitelist");
   LUA->PushCFunction(AddWhitelistIP);            LUA->SetField(-2, "AddWhitelistIP");
