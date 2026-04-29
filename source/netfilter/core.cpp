@@ -1016,9 +1016,7 @@ private:
     bf_read packet(data, len);
     const auto channel = static_cast<int32_t>(packet.ReadLong());
     if (channel == -2) {
-      DevWarning("[ServerSecure] Bad OOB! len: %d, channel: 0x%X from %s\n",
-                 len, channel, IPToString(from.sin_addr));
-      return PacketType::Invalid;
+      return PacketType::Good; // split packet fragment, let engine reassemble
     }
 
     if (channel != -1) {
