@@ -1063,40 +1063,7 @@ private:
         return PacketType::Good;
 
       case 'k': // steam auth
-      {
-        const int32_t protocol = packet.ReadLong();
-        if (protocol != default_netproto_version) {
-          DevWarning("[ServerSecure] Bad protocol number from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const int32_t authProtocol = packet.ReadLong();
-        if (authProtocol != PROTOCOL_STEAM) {
-          DevWarning("[ServerSecure] Bad authentication protocol from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const int32_t challengeNr = packet.ReadLong();
-
-        netadr_t netaddr{};
-        netaddr.SetFromSockadr(reinterpret_cast<const sockaddr *>(&from));
-        if (!CheckChallengeNr(netaddr, challengeNr)) {
-          DevWarning("[ServerSecure] Bad connection challenge from %s\n",
-                     IPToString(from.sin_addr));
-          return PacketType::Invalid;
-        }
-
-        const auto time = static_cast<uint32_t>(Plat_FloatTime());
-        const auto rate_limit = client_manager.CheckIPRate(from.sin_addr.s_addr, time);
-        if (rate_limit != ClientManager::RateLimitType::None) {
-          return PacketType::Invalid;
-        }
-
-        // skip rest
         return PacketType::Good;
-      }
 
       default:
         DevWarning("[ServerSecure] Bad OOB type: %c\n", type);
@@ -1118,23 +1085,6 @@ private:
                  IPToString(from.sin_addr),
                  rate_limit == ClientManager::RateLimitType::Individual ? "individual" : "global");
       return PacketType::Invalid;
-    }
-
-    // If no challenge provided (25 bytes), reply with 'A' challenge
-    if (length == 25) {
-      return SendInfoChallenge(from);
-    }
-
-    // If challenge provided (29 or junk with 1200), verify
-    constexpr ssize_t CHALLENGE_OFFSET = 4 + 1 + 19 + 1; // -1, 'T', "Source Engine Query", '\0'
-    if (length >= CHALLENGE_OFFSET + 4) {
-      uint32_t challenge = 0;
-      std::memcpy(&challenge, buffer + CHALLENGE_OFFSET, sizeof(challenge));
-      netadr_t net_addr(from.sin_addr.s_addr, from.sin_port);
-      if (CBaseServerProxy::Singleton &&
-          !CBaseServerProxy::Singleton->CheckChallengeNr(net_addr, static_cast<int>(challenge))) {
-        return SendInfoChallenge(from);
-      }
     }
 
     // Map override hook
